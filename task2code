@@ -1,0 +1,144 @@
+import os
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms, models
+from PIL import Image
+
+# 1. Dataset Class
+class HousingDataset(Dataset):
+    def __init__(self, dataframe, image_dir, tabular_features, target, transform=None):
+        self.data = dataframe
+        self.image_dir = image_dir
+        self.tabular_features = tabular_features
+        self.target = target
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        row = self.data.iloc[idx]
+        
+        # Load image
+        image_path = os.path.join(self.image_dir, row['image_id'])
+        image = Image.open(image_path).convert('RGB')
+        if self.transform:
+            image = self.transform(image)
+
+        # Tabular data
+        tabular = torch.tensor(row[self.tabular_features].values, dtype=torch.float)
+
+        # Target
+        label = torch.tensor(row[self.target], dtype=torch.float)
+
+        return image, tabular, label
+
+# 2. Multimodal Model
+class MultimodalRegressor(nn.Module):
+    def __init__(self, tabular_input_dim):
+        super(MultimodalRegressor, self).__init__()
+        
+        # CNN backbone (ResNet18)
+        self.cnn = models.resnet18(pretrained=True)
+        self.cnn.fc = nn.Identity()  # remove final classification layer
+        cnn_output_dim = 512
+
+        # Tabular MLP
+        self.tabular_net = nn.Sequential(
+            nn.Linear(tabular_input_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32)
+        )
+
+        # Fusion + Regression Head
+        self.fc = nn.Sequential(
+            nn.Linear(cnn_output_dim + 32, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
+        )
+
+    def forward(self, image, tabular):
+        image_features = self.cnn(image)
+        tabular_features = self.tabular_net(tabular)
+        combined = torch.cat((image_features, tabular_features), dim=1)
+        output = self.fc(combined)
+        return output.squeeze()
+
+# 3. Training & Evaluation Function
+def train_model(model, train_loader, val_loader, epochs=10, lr=1e-4):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
+
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    for epoch in range(epochs):
+        model.train()
+        train_losses = []
+
+        for images, tabular, labels in train_loader:
+            images, tabular, labels = images.to(device), tabular.to(device), labels.to(device)
+
+            optimizer.zero_grad()
+            outputs = model(images, tabular)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            train_losses.append(loss.item())
+
+        # Validation
+        model.eval()
+        val_preds, val_targets = [], []
+        with torch.no_grad():
+            for images, tabular, labels in val_loader:
+                images, tabular = images.to(device), tabular.to(device)
+                outputs = model(images, tabular).cpu().numpy()
+                val_preds.extend(outputs)
+                val_targets.extend(labels.numpy())
+
+        mae = mean_absolute_error(val_targets, val_preds)
+        rmse = mean_squared_error(val_targets, val_preds, squared=False)
+        print(f"Epoch {epoch+1}/{epochs} - Loss: {np.mean(train_losses):.4f} - Val MAE: {mae:.2f} - Val RMSE: {rmse:.2f}")
+
+    return model
+
+# 4. Load Data
+df = pd.read_csv("housing.csv")  # must include 'image_id' and 'price'
+image_dir = "images/"
+
+# Define features
+tabular_features = ['num_rooms', 'area', 'location_score']  # adjust as needed
+target = 'price'
+
+# Normalize tabular data
+scaler = StandardScaler()
+df[tabular_features] = scaler.fit_transform(df[tabular_features])
+
+# Split data
+train_df, val_df = train_test_split(df, test_size=0.2, random_state=42)
+
+# Image transforms
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+# Datasets and Loaders
+train_dataset = HousingDataset(train_df, image_dir, tabular_features, target, transform)
+val_dataset = HousingDataset(val_df, image_dir, tabular_features, target, transform)
+
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=32)
+
+# 5. Build and Train Model
+model = MultimodalRegressor(tabular_input_dim=len(tabular_features))
+trained_model = train_model(model, train_loader, val_loader, epochs=10)
