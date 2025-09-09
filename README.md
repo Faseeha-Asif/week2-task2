@@ -1,6 +1,6 @@
-# Advanced-Task-3
+# Advanced-Task-2
 
-## 🧠 Task 3: Multimodal Machine Learning – Housing Price Prediction Using Images and Tabular Data
+## 🧠 Task 2: Multimodal Machine Learning – Housing Price Prediction Using Images and Tabular Data
 
 ### 🎯 Objective
 
